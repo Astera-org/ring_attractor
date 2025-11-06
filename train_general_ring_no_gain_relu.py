@@ -79,7 +79,7 @@ class GeneralizedRingAttractorNoGain(nn.Module):
         j = indices.unsqueeze(0)
         angle_diff = 2 * np.pi * (i - j) / num_neurons
         self.register_buffer('W_delta7', torch.cos(angle_diff))
-        smoothing_width = max(5, int(num_neurons/16))  # Adjust: 1=3-neuron window, 2=5-neuron window, etc.
+        smoothing_width = num_neurons // 4  # Adjust: 1=3-neuron window, 2=5-neuron window, etc.
         circular_dist = torch.minimum(torch.abs(i - j), num_neurons - torch.abs(i - j))
         smooth_matrix = (circular_dist <= smoothing_width).float()
         smooth_matrix = smooth_matrix / smooth_matrix.sum(dim=1, keepdim=True)
@@ -89,17 +89,25 @@ class GeneralizedRingAttractorNoGain(nn.Module):
         # Fixed parameters
         # For Relu
         self.J0 = -2 * torch.ones(num_neurons, num_neurons) / self.weight_scale
-        self.J1 = 1.0
+        self.J1 = 2.0
         # self.J1 = nn.Parameter(torch.tensor(2.0))   # Learnable scalar parameter
-        self.recurrent_bias = nn.Parameter(torch.tensor(0.5))  # Learnable bias
-
-        # Learnable parameters
-        self.Wo = nn.Parameter(torch.randn(num_neurons, num_neurons) / self.weight_scale)
+        self.recurrent_bias = nn.Parameter(torch.tensor(0.1))  # Learnable bias
 
         # Action weight tensor: (action_dim, num_neurons, num_neurons)
         if initialization == 'random':
-            self.Wa = nn.Parameter(torch.randn(action_dim, num_neurons, num_neurons) / self.weight_scale)
+            # self.Wo = nn.Parameter(torch.randn(num_neurons, num_neurons) / self.weight_scale)
+            # self.Wa = nn.Parameter(torch.randn(action_dim, num_neurons, num_neurons) / self.weight_scale)
+            # Use Xavier initialization for better stability            
+            self.Wo = nn.Parameter(torch.empty(num_neurons, num_neurons))
+            nn.init.xavier_normal_(self.Wo)
+            self.Wo.data /= self.weight_scale
+            
+            self.Wa = nn.Parameter(torch.empty(action_dim, num_neurons, num_neurons))
+            nn.init.xavier_normal_(self.Wa)
+            self.Wa.data /= self.weight_scale
+            
         elif initialization == 'perfect':
+            self.Wo = self.W_delta7.clone() / self.weight_scale
             if action_dim == 2:
                 # Classic L/R setup
                 wl = torch.cos(angle_diff + np.pi / 4)
@@ -163,7 +171,7 @@ class GeneralizedRingAttractorNoGain(nn.Module):
             # recurrent_input = non_linear(recurrent_input, self.activation_name)
 
             # Update rule (leaky integration)
-            alpha = 0.10
+            alpha = 0.50
             # r = r * (1 - alpha) + recurrent_input * alpha
             self.h = self.h * (1 - alpha) + recurrent_input * alpha
             self.h = self.h @ self.smooth_matrix  # Smooth over neurons (batch, N) @ (N, N) = (batch, N)
@@ -237,9 +245,9 @@ def run_training_and_evaluation(action_dim=2):
     print("Note: This model has NO gain networks - using raw action signals directly")
 
     # --- Training Parameters ---
-    num_neurons = 16
-    training_steps = 3000
-    learning_rate = 2e-2
+    num_neurons = 64
+    training_steps = 2000
+    learning_rate = 3e-4 # 2e-2: 16 neurons; 1e-3: 32 and 64 neurons; 3e-4: 128 neurons
     batch_size = 512
     seq_len = 120
 
@@ -264,7 +272,7 @@ def run_training_and_evaluation(action_dim=2):
         action_dim=action_dim,
         tau=10,
         dt=1,
-        activation='relu',
+        activation='gelu',
         initialization=initial_weights
     )
     ring_rnn.to(device)
