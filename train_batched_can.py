@@ -103,11 +103,12 @@ class BatchedContinuousAttractor(nn.Module):
 
         # Learnable structured weight matrices (W_sym sustains the bump, W_asym rotates it)
         self.W_sym = nn.Parameter(self._init_structured_kernel(cos_diff))
-        self.W_asym = nn.Parameter(self._init_asym_kernels(sin_diff))
+        asym_template = cos_diff if initialization == "sym+random" else sin_diff
+        self.W_asym = nn.Parameter(self._init_asym_kernels(asym_template))
 
     def _init_structured_kernel(self, template: torch.Tensor) -> torch.Tensor:
         """Initializes the symmetric maintenance weights (W_sym analogue)."""
-        if self.initialization in {"canonical", "perfect"}:
+        if self.initialization in {"canonical", "perfect", "sym+random"}:
             noise = self.init_noise_std * torch.randn_like(template) / math.sqrt(self.num_neurons)
             kernel = template.clone() + noise
         elif self.initialization == "random":
@@ -123,6 +124,10 @@ class BatchedContinuousAttractor(nn.Module):
             left = -template.clone()
             right = template.clone()
             kernel = torch.stack([left, right], dim=0) + noise
+        elif self.initialization == "sym+random":
+            noise = self.init_noise_std * torch.randn(2, *template.shape) / math.sqrt(self.num_neurons)
+            base = template.clone()
+            kernel = torch.stack([base, base], dim=0) + noise
         elif self.initialization == "random":
             kernel = torch.randn(
                 2, *template.shape, device=template.device, dtype=template.dtype
@@ -199,27 +204,48 @@ class BatchedContinuousAttractor(nn.Module):
         return w_sym, w_asym_left, w_asym_right, self.smooth_matrix.detach().cpu().numpy()
 
 
-def plot_can_kernels(model: BatchedContinuousAttractor, title_prefix: str):
+def plot_can_kernels(model: BatchedContinuousAttractor, title_prefix: str, initial_kernels=None):
     """Visualize the effective kernels used by the batched CAN."""
     w_sym, w_asym_left, w_asym_right, smoothing = model.export_effective_weights()
-    fig, axes = plt.subplots(1, 4, figsize=(20, 4))
-    fig.suptitle(f"{title_prefix} Kernels")
+    if initial_kernels is not None:
+        init_w_sym, init_w_left, init_w_right = initial_kernels
+        fig, axes = plt.subplots(2, 4, figsize=(20, 8))
+        rows = [("Initial", init_w_sym, init_w_left, init_w_right), ("Trained", w_sym, w_asym_left, w_asym_right)]
+        for row_idx, (label, sym, left, right) in enumerate(rows):
+            im0 = axes[row_idx, 0].imshow(sym, cmap="viridis")
+            axes[row_idx, 0].set_title(f"{label} W_sym")
+            fig.colorbar(im0, ax=axes[row_idx, 0])
 
-    im0 = axes[0].imshow(w_sym, cmap="viridis")
-    axes[0].set_title("W_sym (local exc + global inh)")
-    fig.colorbar(im0, ax=axes[0])
+            im1 = axes[row_idx, 1].imshow(left, cmap="coolwarm")
+            axes[row_idx, 1].set_title(f"{label} W_asym (Left turn)")
+            fig.colorbar(im1, ax=axes[row_idx, 1])
 
-    im1 = axes[1].imshow(w_asym_left, cmap="coolwarm")
-    axes[1].set_title("W_asym (Left turn)")
-    fig.colorbar(im1, ax=axes[1])
+            im2 = axes[row_idx, 2].imshow(right, cmap="coolwarm")
+            axes[row_idx, 2].set_title(f"{label} W_asym (Right turn)")
+            fig.colorbar(im2, ax=axes[row_idx, 2])
 
-    im2 = axes[2].imshow(w_asym_right, cmap="coolwarm")
-    axes[2].set_title("W_asym (Right turn)")
-    fig.colorbar(im2, ax=axes[2])
+            im3 = axes[row_idx, 3].imshow(smoothing, cmap="magma")
+            axes[row_idx, 3].set_title("Smoothing kernel" if row_idx == 0 else "")
+            fig.colorbar(im3, ax=axes[row_idx, 3])
+        fig.suptitle(f"{title_prefix} Kernels (Initial vs Trained)")
+    else:
+        fig, axes = plt.subplots(1, 4, figsize=(20, 4))
+        fig.suptitle(f"{title_prefix} Kernels")
+        im0 = axes[0].imshow(w_sym, cmap="viridis")
+        axes[0].set_title("W_sym (local exc + global inh)")
+        fig.colorbar(im0, ax=axes[0])
 
-    im3 = axes[3].imshow(smoothing, cmap="magma")
-    axes[3].set_title("Smoothing kernel")
-    fig.colorbar(im3, ax=axes[3])
+        im1 = axes[1].imshow(w_asym_left, cmap="coolwarm")
+        axes[1].set_title("W_asym (Left turn)")
+        fig.colorbar(im1, ax=axes[1])
+
+        im2 = axes[2].imshow(w_asym_right, cmap="coolwarm")
+        axes[2].set_title("W_asym (Right turn)")
+        fig.colorbar(im2, ax=axes[2])
+
+        im3 = axes[3].imshow(smoothing, cmap="magma")
+        axes[3].set_title("Smoothing kernel")
+        fig.colorbar(im3, ax=axes[3])
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     filename = f"{title_prefix.lower().replace(' ', '_')}_batched_can_kernels.png"
@@ -237,7 +263,7 @@ def run_batched_can_experiment(
     tau: float = 5.0,
     dt: float = 1.0,
     smoothing_width: int = 4,
-    smoothing_strength: float = 0.2,
+    smoothing_strength: float = 0.0,
     max_av: float = 0.1 * math.pi,
     fast_mode: bool = True,
     initialization: str = "canonical",
@@ -246,6 +272,8 @@ def run_batched_can_experiment(
     weight_lr_scale: float = 1.0,
     random_weight_std: float = 1.0,
     train_ring_gains: bool = True,
+    stability_weight: float = 0.1,
+    stability_eps: float = 5e-3,
 ):
     """
     Train the batched CAN to reproduce target angles from AVIntegrationDataset.
@@ -257,7 +285,7 @@ def run_batched_can_experiment(
     dataset = AVIntegrationDataset(
         num_samples=training_steps * batch_size,
         seq_len=seq_len,
-        zero_padding_start_ratio=0.5,
+        zero_padding_start_ratio=0.3,
         zero_ratios_in_rest=[0.2, 0.5, 0.8],
         max_av=max_av,
         device=device,
@@ -282,6 +310,15 @@ def run_batched_can_experiment(
     initial_J_E = model.J_E.detach().item()
     initial_J_I = model.J_I.detach().item()
     initial_g_v = model.g_v.detach().item()
+    initial_kernels = (
+        (
+            (initial_J_I * torch.ones_like(initial_W_sym) + initial_J_E * initial_W_sym)
+            .cpu()
+            .numpy(),
+            initial_g_v * initial_W_asym[0].cpu().numpy(),
+            initial_g_v * initial_W_asym[1].cpu().numpy(),
+        )
+    )
 
     if weight_lr_scale != 1.0:
         scalar_params = []
@@ -314,8 +351,9 @@ def run_batched_can_experiment(
         cosine_activity, bump_activity = model(av_signal, r_init=r_init)
 
         main_loss = cosine_similarity_loss(cosine_activity, target_angle)
-        amp_loss = bump_amplitude_loss(bump_activity, target_amplitude=0.4)
-        total_loss = main_loss + 0.2 * amp_loss
+        amp_loss = bump_amplitude_loss(bump_activity, target_amplitude=0.6)
+        stability_loss = bump_stability_loss(bump_activity, av_signal, eps=stability_eps)
+        total_loss = main_loss + 0.2 * amp_loss + stability_weight * stability_loss
 
         optimizer.zero_grad()
         total_loss.backward()
@@ -329,6 +367,7 @@ def run_batched_can_experiment(
             print(
                 f"Step {step:04d} | total {total_loss.item():.4f} "
                 f"| angle {main_loss.item():.4f} | amp {amp_loss.item():.4f} "
+                f"| stable {stability_loss.item():.4f} "
                 f"| J_E {model.J_E.item():.3f} J_I {model.J_I.item():.3f} "
                 f"| ||W_sym|| {model.W_sym.norm().item():.2f} "
                 f"| ||W_asym_L|| {model.W_asym[0].norm().item():.2f} "
@@ -348,14 +387,14 @@ def run_batched_can_experiment(
         f"||ΔW_asym_left||_F = {asym_delta_left:.4f}, "
         f"||ΔW_asym_right||_F = {asym_delta_right:.4f}"
     )
-    plot_can_kernels(model, title_prefix="Trained")
+    plot_can_kernels(model, title_prefix="Trained", initial_kernels=initial_kernels)
 
     # Evaluation on a long held-out trajectory
     model.eval()
     test_dataset = AVIntegrationDataset(
         num_samples=1,
         seq_len=1200,
-        zero_padding_start_ratio=0.3,
+        zero_padding_start_ratio=0.2,
         zero_ratios_in_rest=[0.1],
         max_av=max_av,
         device=device,
@@ -445,6 +484,25 @@ def run_batched_can_experiment(
     return model, loss_history
 
 
+def bump_stability_loss(bump_activity: torch.Tensor, av_signal: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
+    """
+    Encourage the bump to remain unchanged whenever the angular velocity input is ~0.
+    Looks at consecutive time steps where |av| < eps and penalizes bump deltas.
+    """
+    if bump_activity.shape[1] < 2:
+        return torch.zeros(1, device=bump_activity.device, dtype=bump_activity.dtype)
+
+    silent_mask = (av_signal.abs() < eps).float()
+    silent_pairs = silent_mask[:, 1:] * silent_mask[:, :-1]
+    if silent_pairs.sum() == 0:
+        return torch.zeros(1, device=bump_activity.device, dtype=bump_activity.dtype)
+
+    diffs = bump_activity[:, 1:] - bump_activity[:, :-1]
+    sq_norm = diffs.pow(2).sum(dim=2)
+    loss = (sq_norm * silent_pairs).sum() / silent_pairs.sum().clamp_min(1.0)
+    return loss
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -457,11 +515,11 @@ if __name__ == "__main__":
     parser.add_argument("--tau", type=float, default=5.0, help="Membrane time constant τ")
     parser.add_argument("--dt", type=float, default=1.0, help="Integration step size Δt")
     parser.add_argument("--smoothing_width", type=int, default=4, help="Half-width for smoothing kernel")
-    parser.add_argument("--smoothing_strength", type=float, default=0.2, help="Blend factor for smoothing (0 disables)")
+    parser.add_argument("--smoothing_strength", type=float, default=0.0, help="Blend factor for smoothing (0 disables)")
     parser.add_argument("--max_av", type=float, default=0.1 * math.pi, help="Max angular velocity magnitude")
     parser.add_argument(
         "--initialization",
-        choices=["canonical", "perfect", "random"],
+        choices=["canonical", "perfect", "sym+random", "random"],
         default="canonical",
         help="Kernel initialization (matches W_sym/W_asym choices).",
     )
@@ -483,6 +541,18 @@ if __name__ == "__main__":
         "--fix_ring_gains",
         action="store_true",
         help="Freeze J_E and J_I (stay at analytic CAN values).",
+    )
+    parser.add_argument(
+        "--stability_weight",
+        type=float,
+        default=0.1,
+        help="Weight for the zero-velocity stability regularizer.",
+    )
+    parser.add_argument(
+        "--stability_eps",
+        type=float,
+        default=5e-3,
+        help="Velocity magnitude threshold for stability loss.",
     )
     parser.add_argument(
         "--slow_mode",
@@ -509,4 +579,6 @@ if __name__ == "__main__":
         weight_lr_scale=args.weight_lr_scale,
         random_weight_std=args.random_weight_std,
         train_ring_gains=not args.fix_ring_gains,
+        stability_weight=args.stability_weight,
+        stability_eps=args.stability_eps,
     )
