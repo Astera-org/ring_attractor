@@ -183,9 +183,10 @@ class BatchedContinuousAttractor(nn.Module):
                 smoothed = torch.matmul(h, self.smooth_matrix)
                 h = (1 - self.smoothing_strength) * h + self.smoothing_strength * smoothed
 
-            rates = torch.relu(h)
+            delta_7_output = torch.matmul(rates, self.W_delta7)
+            rates = torch.relu(h + delta_7_output * 0.1)  # for logging only
             bump_history.append(rates)
-            cosine_history.append(torch.matmul(rates, self.W_delta7))
+            cosine_history.append(delta_7_output)
 
         cosine_activity = torch.stack(cosine_history, dim=1)
         bump_activity = torch.stack(bump_history, dim=1)
@@ -270,7 +271,7 @@ def run_batched_can_experiment(
     n_act_choice: Optional[int] = None,
     init_noise_std: float = 0.05,
     weight_lr_scale: float = 1.0,
-    random_weight_std: float = 1.0,
+    random_weight_std: float = 0.5,
     train_ring_gains: bool = True,
     stability_weight: float = 0.1,
     stability_eps: float = 5e-3,
@@ -415,9 +416,9 @@ def run_batched_can_experiment(
     fig.suptitle("Batched CAN Evaluation")
 
     im0 = axes[0].imshow(cosine_activity_test[0].detach().cpu().numpy().T, aspect="auto")
-    axes[0].set_title("Cosine activity (delta_7 basis)")
+    axes[0].set_title(f"Cosine activity (delta_7 basis), max rate {cosine_activity_test.max().item():.2f}")
     axes[0].set_ylabel("Neuron")
-    fig.colorbar(im0, ax=axes[0])
+    # fig.colorbar(im0, ax=axes[0])
 
     axes[1].plot(bump_activity_test[0, 0].detach().cpu().numpy(), label="t=0")
     mid_idx = bump_activity_test.shape[1] // 2
