@@ -44,10 +44,10 @@ class BatchedContinuousAttractor(nn.Module):
     def __init__(
         self,
         num_neurons: int,
-        tau: float = 5.0,
+        tau: float = 10.0,
         dt: float = 1.0,
         init_je: Optional[float] = None,
-        init_ji: float = -2.0,
+        init_ji: float = -1.0,
         init_c_ff: float = 1.0,
         init_gv: float = 5.0,
         smoothing_width: int = 4,
@@ -183,8 +183,10 @@ class BatchedContinuousAttractor(nn.Module):
                 smoothed = torch.matmul(h, self.smooth_matrix)
                 h = (1 - self.smoothing_strength) * h + self.smoothing_strength * smoothed
 
+            h = h / torch.norm(h, dim=1, keepdim=True)
             delta_7_output = torch.matmul(rates, self.W_delta7)
-            rates = torch.relu(h + delta_7_output * 0.1)  # for logging only
+            rates = torch.relu(h + delta_7_output * 0.2) 
+            # rates = torch.nn.functional.gelu(h + delta_7_output * 0.2) 
             bump_history.append(rates)
             cosine_history.append(delta_7_output)
 
@@ -352,9 +354,9 @@ def run_batched_can_experiment(
         cosine_activity, bump_activity = model(av_signal, r_init=r_init)
 
         main_loss = cosine_similarity_loss(cosine_activity, target_angle)
-        amp_loss = bump_amplitude_loss(bump_activity, target_amplitude=0.6)
+        amp_loss = bump_amplitude_loss(bump_activity, target_amplitude=target_amplitude)
         stability_loss = bump_stability_loss(bump_activity, av_signal, eps=stability_eps)
-        total_loss = main_loss + 0.2 * amp_loss + stability_weight * stability_loss
+        total_loss = main_loss + num_neurons * amp_loss + stability_weight * stability_loss
 
         optimizer.zero_grad()
         total_loss.backward()

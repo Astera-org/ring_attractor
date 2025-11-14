@@ -104,7 +104,7 @@ def train_with_wandb(config: Dict[str, Any], project: str, entity: Optional[str]
     dataset = AVIntegrationDataset(
         num_samples=config["training_steps"] * config["batch_size"],
         seq_len=config["seq_len"],
-        zero_padding_start_ratio=0.5,
+        zero_padding_start_ratio=0.8,
         zero_ratios_in_rest=[0.2, 0.5, 0.8],
         max_av=config["max_av"],
         device=device,
@@ -155,7 +155,8 @@ def train_with_wandb(config: Dict[str, Any], project: str, entity: Optional[str]
         main_loss = cosine_similarity_loss(cosine_activity, target_angle)
         amp_loss = bump_amplitude_loss(bump_activity, target_amplitude=target_amp)
         stability_loss = bump_stability_loss(bump_activity, av_signal, eps=config["stability_eps"])
-        total_loss = main_loss + 0.2 * amp_loss + config["stability_weight"] * stability_loss
+        total_loss = main_loss + config["stability_weight"] * stability_loss
+        # total_loss = total_loss + 1.0 * amp_loss
 
         optimizer.zero_grad()
         total_loss.backward()
@@ -332,7 +333,7 @@ def main():
     parser.add_argument("--tau", type=float, default=5.0)
     parser.add_argument("--dt", type=float, default=1.0)
     parser.add_argument("--smoothing_width", type=int, default=4)
-    parser.add_argument("--smoothing_strength", type=float, default=1.0)
+    parser.add_argument("--smoothing_strength", type=float, default=0.0)
     parser.add_argument("--max_av", type=float, default=0.1 * np.pi)
     parser.add_argument(
         "--initialization",
